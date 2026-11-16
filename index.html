@@ -118,6 +118,9 @@ nav.tabs button.on{color:var(--ink)} nav.tabs button.on .i{filter:none;opacity:1
 .rule:first-child{border-top:none}
 .x{border:none;background:none;color:var(--muted);font-size:18px;cursor:pointer;padding:0 6px}
 details summary{cursor:pointer;font-weight:600;font-size:14px}
+details.card>summary{list-style:none}
+details.card>summary::-webkit-details-marker{display:none}
+details.card[open] .tog{visibility:hidden}
 .badlist div{font-size:12px;color:var(--muted);border-top:1px solid var(--line);padding:6px 0;white-space:pre-wrap}
 </style>
 </head>
@@ -166,7 +169,13 @@ function localISO(dt){return dt.getFullYear()+'-'+pad2(dt.getMonth()+1)+'-'+pad2
 function parseSMS(raw, fallbackISO){
   let t=toAsciiDigits(String(raw||'')).replace(/[‎‏‪-‮]/g,'').replace(/\r/g,'').trim();
   if(!t) return null;
-  if(/\bOTP\b|one[- ]?time (?:pass|code)|verification code|passcode|رمز التحقق|رمز التفعيل|رمز الدخول|كلمة المرور المؤقتة|كلمة مرور لمرة واحدة|الرمز السري المؤقت/i.test(t)) return {skip:true};
+  // ignore: one-time codes (OTP / رمز), statements issued, payment confirmations
+  if(/\bOTP\b|one[- ]?time (?:pass|code)|verification code|passcode|رمز|كلمة المرور المؤقتة|كلمة مرور لمرة واحدة/i.test(t)) return {skip:true};
+  if(/كشف\s*(?:ال)?حساب|statement (?:is |has been )?(?:issued|ready|generated)/i.test(t)) return {skip:true};
+  if(/تأكيد\s*(?:ال)?سداد/.test(t)) return {skip:true};
+  // remove balance figures so only the transaction amount is read
+  t=t.replace(/(?:ال)?رصيد(?:\s*(?:ال)?متاح)?\s*:?\s*(?:SAR|SR|ر\.?\s?س\.?|ريال)?\s*-?[0-9][0-9,]*(?:\.[0-9]+)?\s*(?:SAR|SR|ر\.?\s?س\.?|ريال)?/g,' ')
+       .replace(/(?:avail(?:able)?\.?\s*)?bal(?:ance)?\.?\s*:?\s*(?:SAR|SR)?\s*-?[0-9][0-9,]*(?:\.[0-9]+)?\s*(?:SAR|SR)?/gi,' ');
   // amount
   let amount=null;
   const am=t.match(/(?:SAR|SR|ر\.?\s?س\.?|ريال)\s*([0-9][0-9,]*(?:\.[0-9]+)?)/i)||t.match(/([0-9][0-9,]*(?:\.[0-9]+)?)\s*(?:SAR|SR|ر\.?\s?س|ريال)/i);
@@ -381,6 +390,12 @@ async function pullInbox(){
   }
   return out;
 }
+async function pullIssues(){
+  const r=await gh('/issues?state=open&per_page=100');
+  if(!r.ok) return [];
+  const list=await r.json(); if(!Array.isArray(list)) return [];
+  return list.filter(i=>!i.pull_request&&/^\s*sms/i.test(i.title||'')).map(i=>({issue:i.number,name:'',fb:i.created_at?localISO(new Date(i.created_at)):null,text:i.body||''}));
+}
 function inboxDate(name){
   const m=String(name).match(/(\d{4})(\d{2})(\d{2})-?(\d{2})(\d{2})(\d{2})?/);
   return m?`${m[1]}-${m[2]}-${m[3]}T${m[4]}:${m[5]}:${m[6]||'00'}`:null;
@@ -390,7 +405,7 @@ function importInbox(files){
   for(const m of Object.values(S.months)){(m.tx||[]).forEach(t=>existing.add(t.k));(m.del||[]).forEach(k=>deleted.add(k));}
   let added=0; const touched=new Set();
   for(const f of files){
-    const r=parseSMS(f.text,inboxDate(f.name));
+    const r=parseSMS(f.text,f.fb||inboxDate(f.name));
     if(!r||r.skip||existing.has(r.k)||deleted.has(r.k)) continue;
     existing.add(r.k); const k=monthKey(r.d); M(k).tx.push(r); touched.add(k); added++;
   }
@@ -398,7 +413,10 @@ function importInbox(files){
   return added;
 }
 async function clearInbox(files){
-  for(const f of files){ try{ await gh('/contents/inbox/'+encodeURIComponent(f.name),{method:'DELETE',body:JSON.stringify({message:'Mizan imported',sha:f.sha})}); }catch(e){} }
+  for(const f of files){ try{
+    if(f.issue) await gh('/issues/'+f.issue,{method:'PATCH',body:JSON.stringify({title:'imported',body:'',state:'closed',state_reason:'completed'})});
+    else await gh('/contents/inbox/'+encodeURIComponent(f.name),{method:'DELETE',body:JSON.stringify({message:'Mizan imported',sha:f.sha})});
+  }catch(e){} }
 }
 const SYNC_MSG={token:'GitHub token not accepted',repo:'Storage repo not found',perm:'Token can’t write to the repo',pass:'Wrong passphrase',format:'data.json isn’t a Mizan file',net:'Offline — will retry',conflict:'Sync conflict — will retry'};
 let syncing=false, syncAgain=false, syncTimer=null, syncErr=null;
@@ -416,6 +434,7 @@ async function syncNow(){
   try{
     let inbox=[], imported=0;
     try{ inbox=await pullInbox(); }catch(e){ if(e&&e.code==='token') throw e; inbox=[]; }
+    try{ inbox=inbox.concat(await pullIssues()); }catch(e){ if(e&&e.code==='token') throw e; }
     for(let attempt=0;;attempt++){
       const {data,sha}=await pullRemote();
       if(attempt===0&&inbox.length) imported=importInbox(inbox);
@@ -572,27 +591,28 @@ function vSetup(){
   </div>
 
 
-  <div class="card"><h2>Automatic capture (iPhone Shortcut)</h2>
+  <details class="card"><summary><div class="row"><h2 style="margin:0">Shortcut setup steps</h2><span class="note tog" style="margin:0;white-space:nowrap">Show ▾</span></div></summary><div style="margin-top:10px">
   ${cfgOK()?`<p class="note" style="margin-top:0;margin-bottom:6px">Each bank SMS is sent straight to your private repo. Mizan imports it the next time you open the app, then deletes the raw message from GitHub.</p>
     <ol class="steps">
-      <li>Open <b>Shortcuts</b> → <b>Automation</b> → <b>＋</b> → <b>Message</b>. Under <b>Sender</b>, choose your bank (save its SMS name as a contact first if it isn't listed). Make one automation per bank.</li>
-      <li>Pick <b>Run Immediately</b>, turn off <b>Notify When Run</b>, then <b>Next</b> → <b>New Blank Automation</b>.</li>
-      <li>Add <b>Text</b> and insert the <b>Shortcut Input</b> variable.</li>
-      <li>Add <b>If</b>: <b>Text</b> <i>contains</i> <code>OTP</code>. Tap <b>Add Condition</b>, add <b>Text</b> <i>contains</i> <code>رمز</code>, and set it to <b>Any</b> are true. Leave the first branch empty. Put every step below inside <b>Otherwise</b>. This stops one-time codes from ever leaving your phone.</li>
-      <li>Add <b>Base64 Encode</b> (it uses the Text). Tap the arrow on the action and set <b>Line Breaks</b> to <b>None</b>.</li>
-      <li>Add <b>Format Date</b>: Date = <b>Current Date</b>, Format = <b>Custom</b>, <code>yyyyMMdd-HHmmss</code>.</li>
-      <li>Add <b>Random Number</b> between <code>1000</code> and <code>9999</code>.</li>
-      <li>Add <b>Get Contents of URL</b> with this URL, replacing the two words in capitals with the blue variables <b>Formatted Date</b> and <b>Random Number</b>:
-        <pre class="mono" id="inboxurl">https://api.github.com/repos/${esc(cfg.repo)}/contents/inbox/DATE-NUMBER.txt</pre>
+      <li><b>Shortcuts</b> app → <b>Automation</b> tab → <b>＋</b> → <b>Message</b>.</li>
+      <li>Tap <b>Message Contains</b>, type <code>SAR</code>, tap <b>Done</b>. Choose <b>Run Immediately</b>, turn off <b>Notify When Run</b>, tap <b>Next</b> → <b>New Blank Automation</b>.</li>
+      <li><b>Add Action</b> → search <b>Text</b> → add it. Tap inside the box and choose <b>Shortcut Input</b>.</li>
+      <li>Search <b>If</b> → add it. Tap <b>Input</b> → <b>Text</b>. Tap <b>Condition</b> → <b>contains</b>. Tap <b>Text</b> → type <code>OTP</code>.</li>
+      <li>On the If action add a second condition: <b>Text</b> contains <code>رمز</code>, and set it to <b>Any</b>, so codes never leave your phone.</li>
+      <li>Search <b>Stop This Shortcut</b>, add it, then drag it up so it sits between <b>If</b> and <b>Otherwise</b>.</li>
+      <li>Search <b>Base64 Encode</b> and add it at the bottom. Tap its blue input → <b>Text</b>. Tap <b>›</b> on the action → <b>Line Breaks</b> → <b>None</b>.</li>
+      <li>Search <b>Format Date</b>, add it. Date = <b>Current Date</b>. Tap <b>›</b> → Date Format <b>Custom</b> → type <code>yyyyMMdd-HHmmss-SSS</code>.</li>
+      <li>Search <b>Get Contents of URL</b>, add it. Tap <b>URL</b>, paste this, delete the word <b>DATE</b> and in its place tap <b>Formatted Date</b> in the bar above the keyboard:
+        <pre class="mono" id="inboxurl">https://api.github.com/repos/${esc(cfg.repo)}/contents/inbox/DATE.txt</pre>
         <button class="btn sm ghost" data-act="copyurl" style="margin-top:6px">Copy URL</button></li>
-      <li>Tap the arrow on that action: <b>Method</b> = <b>PUT</b>.<br><b>Headers</b>: <code>Authorization</code> = <code>Bearer YOUR-TOKEN</code> (your github_pat token) and <code>Accept</code> = <code>application/vnd.github+json</code>.<br><b>Request Body</b> = <b>JSON</b> with two Text fields: <code>message</code> = <code>sms</code>, and <code>content</code> = the <b>Base64 Encoded</b> variable.</li>
-      <li>Done. To test, wait for your next card purchase, then open Mizan — it should appear on its own.</li>
+      <li>Tap <b>›</b> on that action. <b>Method</b> → <b>PUT</b>.<br><b>Headers</b> → Add new header: <code>Authorization</code> = <code>Bearer </code> followed by your token. Add another: <code>Accept</code> = <code>application/vnd.github+json</code>.<br><b>Request Body</b> → <b>JSON</b> → Add new field → <b>Text</b>: key <code>message</code>, value <code>sms</code>. Add another <b>Text</b> field: key <code>content</code>, value = tap and pick <b>Base64 Encoded</b>.</li>
+      <li>Tap <b>Done</b>. Optional: repeat with Message Contains <code>ر.س</code> to also catch cashback texts.</li>
     </ol>
     <p class="note">Privacy: raw messages sit unencrypted in your private repo only until Mizan's next sync, then they're deleted (GitHub's commit history still keeps them). Your token is stored inside the Shortcut on this iPhone.</p>`
   :`<p class="note" style="margin-top:0">Set up sync below first. Then the steps to send every bank SMS here automatically will appear in this box.</p>`}
-  </div>
+  </div></details>
 
-<div class="card"><h2>Paste messages manually</h2>
+  <div class="card"><h2>Paste messages manually</h2>
     <label>Paste your bank messages (leave a blank line between them)</label>
     <textarea id="paste" placeholder="SAB mada(Apple Pay) Card (1234) … was used at … for SAR 24.00 on 2026-11-14 00:17:42"></textarea>
     <div class="btns"><button class="btn" data-act="parsepaste">Add messages</button></div>
@@ -669,8 +689,8 @@ function doImport(text){
 }
 function showImport(r){
   const box=$('#importres'); if(!box) return;
-  box.innerHTML=`<p class="note" style="color:var(--ink)"><b>${r.added}</b> added · ${r.dup} already there · ${r.bad.length} not recognised</p>
-  ${r.bad.length?`<details style="margin-top:6px"><summary>Show messages that weren't recognised</summary><div class="badlist">${r.bad.slice(0,15).map(b=>`<div>${esc(b.slice(0,220))}</div>`).join('')}</div><p class="note">Usually OTPs or alerts with no amount — safe to ignore.</p></details>`:''}`;
+  box.innerHTML=`<p class="note" style="color:var(--ink)"><b>${r.added}</b> added · ${r.dup} already there · ${r.bad.length} ignored</p>
+  ${r.bad.length?`<details style="margin-top:6px"><summary>Show ignored messages</summary><div class="badlist">${r.bad.slice(0,15).map(b=>`<div>${esc(b.slice(0,220))}</div>`).join('')}</div><p class="note">OTPs, statements, payment confirmations and alerts with no amount are skipped on purpose.</p></details>`:''}`;
   if(r.added) toast(`Added ${r.added} transaction${r.added===1?'':'s'}`);
 }
 function findTx(k){for(const [mk,m] of Object.entries(S.months)){const i=(m.tx||[]).findIndex(t=>t.k===k);if(i>=0)return {mk,i,t:m.tx[i]};}return null;}
