@@ -145,10 +145,10 @@ const CATS={
   food:{n:'Food & Dining',e:'🍔'}, groceries:{n:'Groceries',e:'🛒'}, transport:{n:'Transport & Fuel',e:'🚗'},
   shopping:{n:'Shopping',e:'🛍️'}, bills:{n:'Bills & Telecom',e:'💡'}, subs:{n:'Subscriptions',e:'🔁'},
   health:{n:'Health',e:'💊'}, fun:{n:'Entertainment',e:'🎬'}, travel:{n:'Travel',e:'✈️'},
-  education:{n:'Education',e:'📚'}, family:{n:'Family & Gifts',e:'🎁'}, other:{n:'Other',e:'📦'},
+  education:{n:'Education',e:'📚'}, family:{n:'Family & Gifts',e:'🎁'}, people:{n:'Transfers to people',e:'👤'}, other:{n:'Other',e:'📦'},
   income:{n:'Income & Cashback',e:'💰'}, transfer:{n:'Transfer (not spending)',e:'🔄'}
 };
-const SPEND_CATS=['food','groceries','transport','shopping','bills','subs','health','fun','travel','education','family','other'];
+const SPEND_CATS=['food','groceries','transport','shopping','bills','subs','health','fun','travel','education','family','people','other'];
 const KEYWORDS=[
   ['groceries',/panda|بنده|tamimi|التميمي|danube|الدانوب|othaim|العثيم|carrefour|كارفور|lulu|لولو|nesto|farm\b|المزرعة|bin ?dawood|بن داود|manuel|hyper|super ?market|سوبر|تموينات|بقالة|أسواق|اسواق|grocery|baqala/i],
   ['food',/starbucks|ستاربكس|mcdonald|ماكدونالدز|kfc|albaik|البيك|kudu|كودو|herfy|هرفي|hunger ?station|هنقرستيشن|jahez|جاهز|mrsool|مرسول|to ?you|keeta|كيتا|the chefz|cafe|caf[eé]|coffee|كوفي|قهوة|كافيه|restaurant|مطعم|مطاعم|dunkin|tim hortons|barns|بارنز|half million|shawarma|شاورما|pizza|بيتزا|burger|برجر|bakery|مخبز|juice|عصير|dose|kaf|elixir|subway|domino|shake shack|five guys|chili|applebee|maestro|al ?tazaj|الطازج|bloom|sweets|حلويات/i],
@@ -182,12 +182,13 @@ function parseSMS(raw, fallbackISO){
   if(am){amount=parseFloat(am[1].replace(/,/g,''));}
   if(amount==null||isNaN(amount)) return {skip:true};
   // type (order matters: card names contain "Cashback")
-  let type=null;
+  let type=null, p2p=false;
   if(/credit\s*card\s*:?\s*payment|تأكيد السداد|تم سداد بطاقتك|سداد بطاقة|card payment received/i.test(t)) type='transfer';
   else if(/عكس|حوالة عكسية|reversal|reversed|refund|استرجاع|مرتجع/i.test(t)) type='refund';
   else if(/was used at|purchase|شراء|نقاط البيع|withdrawal|سحب|atm|pos\b|e-?commerce|online payment|دفع/i.test(t)) type='expense';
   else if(/استرداد نقدي|cashback\s+(?:of|added|credited)|حوالة واردة|incoming|received|credited|إيداع|ايداع|deposit|راتب|salary/i.test(t)) type='income';
-  else if(/حوالة صادرة|outgoing|transfer|تحويل|حوالة/i.test(t)) type='transfer';
+  else if(/بين حساباتك|حساباتك الخاصة|own accounts?|between (?:your|my) accounts/i.test(t)) type='transfer';
+  else if(/حوالة صادرة|outgoing|transfer|تحويل|حوالة/i.test(t)){ type='expense'; p2p=true; }
   else if(/mada|مدى|apple pay|visa|mastercard|card/i.test(t)) type='expense';
   if(!type) return {skip:true};
   // merchant
@@ -197,6 +198,13 @@ function parseSMS(raw, fallbackISO){
         ||t.match(/\bat\s*:?\s+([^\n]+?)(?:\s+on\s|\s+for\s|\s*$)/im)
         ||t.match(/(?:merchant|التاجر)\s*:?\s*([^\n]+)/i);
   if(mm) merchant=mm[1].trim().replace(/[.،,]+$/,'');
+  if(p2p){
+    const rm=t.match(/(?:^|\n)\s*(?:إلى|الى|للمستفيد|المستفيد|اسم المستفيد|To|Beneficiary(?:\s*name)?)\s*:\s*([^\n]+)/i)
+          ||t.match(/(?:transfer(?:red)?|sent)\s+to\s+([^\n]+?)(?:\s+(?:on|from|for|amount|via)\b|[.,]|$)/im)
+          ||t.match(/(?:إلى|الى)\s+([^\n]+?)(?:\s+بمبلغ|\s+من|\s*$)/m);
+    merchant=rm?rm[1].replace(/\b(?:SA)?\d[\d\s*xX]{5,}\b/g,'').replace(/[*()]+/g,' ').replace(/\s+/g,' ').trim():'';
+    if(!merchant) merchant='Transfer to someone';
+  }
   if(!merchant){
     if(type==='transfer') merchant=/سداد|payment/i.test(t)?'Credit card payment':'Transfer';
     else if(type==='income') merchant=/استرداد نقدي|cashback/i.test(t)?'Cashback':(/راتب|salary/i.test(t)?'Salary':'Incoming transfer');
@@ -218,7 +226,8 @@ function parseSMS(raw, fallbackISO){
   if(!d){ if(fallbackISO) d=fallbackISO; else { d=localISO(new Date()); noDate=true; } }
   let h=0; for(const ch of t) h=(h*31+ch.charCodeAt(0))|0;
   const k=[type,amount.toFixed(2),noDate?'h'+h:d,normMerchant(merchant)].join('|');
-  return {k,t:type,a:amount,m:merchant,c:card,d,src:'sms'};
+  const out={k,t:type,a:amount,m:merchant,c:card,d,src:'sms'}; if(p2p) out.p2p=1;
+  return out;
 }
 function parseLooseDate(s){
   if(!s) return null;
@@ -245,6 +254,7 @@ function autoCategory(tx,rules){
   if(tx.t==='transfer') return 'transfer';
   const key=normMerchant(tx.m);
   if(rules&&rules[key]) return rules[key];
+  if(tx.p2p) return 'people';
   for(const [c,re] of KEYWORDS) if(re.test(tx.m)) return c;
   return 'other';
 }
@@ -282,7 +292,8 @@ function normalize(D){
     g.h=(g.h||[]).map(h=>h.id?h:{...h,id:uid()});
     if(typeof g.saved==='number'){ const diff=Math.round((g.saved-gSaved(g))*100)/100; if(diff) g.h.unshift({id:uid(),d:localISO(new Date()).slice(0,10),a:diff,i:1}); delete g.saved; }
   }
-  for(const m of Object.values(D.months)){ m.tx=m.tx||[]; m.del=m.del||[]; }
+  for(const m of Object.values(D.months)){ m.tx=m.tx||[]; m.del=m.del||[];
+    for(const t of m.tx) if(t.t==='transfer'&&t.src==='sms'&&!t.u&&t.m!=='Credit card payment'){ t.t='expense'; t.p2p=1; } }
   return D;
 }
 function mergeData(a,b){
